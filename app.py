@@ -22,6 +22,10 @@ for key, value in {
 }.items():
     if key not in st.session_state:
         st.session_state[key] = value
+def get_client():
+    return genai.Client(
+        api_key=st.secrets["GEMINI_API_KEY"]
+    )
 
 
 def ask_gemini(prompt, uploaded_file):
@@ -45,23 +49,6 @@ def ask_gemini(prompt, uploaded_file):
 
     finally:
         client.close()
-def ask_gemini(prompt, uploaded_file):
-    mime = uploaded_file.type
-
-    part = types.Part.from_bytes(
-        data=uploaded_file.getvalue(),
-        mime_type=mime
-    )
-
-    response = get_client().models.generate_content(
-        model=MODEL,
-        contents=[prompt, part],
-        config={
-            "response_mime_type": "application/json"
-        }
-    )
-
-    return json.loads(response.text)
 
 
 # SIDEBAR
