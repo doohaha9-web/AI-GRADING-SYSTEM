@@ -1,10 +1,9 @@
 
-import re
-import pandas as pd
+import json
 import streamlit as st
-from PIL import Image, ImageOps, ImageEnhance
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import pandas as pd
+from google import genai
+from google.genai import types
 
 st.set_page_config(
     page_title="AI Student Grading System",
@@ -12,107 +11,43 @@ st.set_page_config(
     layout="wide"
 )
 
+MODEL = "gemini-3.8-flash"
+
 # SESSION DATA
 for key, value in {
     "exam": "My Examination",
     "questions": [],
-    "results": []
+    "results": [],
+    "approved": False
 }.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
 
-# HELPER FUNCTIONS
-def clean(text):
-    return re.sub(r"[^a-z0-9]", "", str(text).lower())
-
-
-def extract_answers(text):
-    answers = {}
-    pattern = (
-        r"(?im)^\s*(?:question\s*)?(?:q\s*)?"
-        r"(\d+)\s*[\).:\-]\s*(.*?)"
-        r"(?=^\s*(?:question\s*)?(?:q\s*)?\d+\s*[\).:\-]|\Z)"
+# GEMINI CONNECTION
+def get_client():
+    return genai.Client(
+        api_key=st.secrets["GEMINI_API_KEY"]
     )
 
-    for number, answer in re.findall(pattern, text, re.S):
-        answers[int(number)] = answer.strip()
 
-    return answers
+def ask_gemini(prompt, uploaded_file):
+    mime = uploaded_file.type
 
+    part = types.Part.from_bytes(
+        data=uploaded_file.getvalue(),
+        mime_type=mime
+    )
 
-def read_image(file):
-    import pytesseract
+    response = get_client().models.generate_content(
+        model=MODEL,
+        contents=[prompt, part],
+        config={
+            "response_mime_type": "application/json"
+        }
+    )
 
-    image = Image.open(file).convert("L")
-    image = ImageOps.autocontrast(image)
-    image = ImageEnhance.Contrast(image).enhance(1.5)
-
-    return pytesseract.image_to_string(image)
-
-
-def check_objective(student, correct):
-    accepted = correct.split("|")
-    return any(clean(student) == clean(a) for a in accepted)
-
-
-def similarity(student, correct):
-    if not student.strip() or not correct.strip():
-        return 0
-
-    try:
-        vectorizer = TfidfVectorizer(
-            analyzer="char_wb",
-            ngram_range=(2, 5)
-        )
-
-        matrix = vectorizer.fit_transform(
-            [correct, student]
-        )
-
-        return cosine_similarity(
-            matrix[0:1], matrix[1:2]
-        )[0][0]
-
-    except ValueError:
-        return 0
-
-
-def evaluate(answers):
-    total = 0
-    maximum = 0
-    details = []
-
-    for q in st.session_state.questions:
-        number = q["number"]
-        marks = q["marks"]
-        maximum += marks
-
-        student = answers.get(number, "")
-
-        if q["type"] == "Objective":
-            score = marks if check_objective(
-                student, q["answer"]
-            ) else 0
-            review = "No"
-
-        else:
-            score = round(
-                marks * similarity(student, q["answer"]), 2
-            )
-            review = "Yes"
-
-        total += score
-
-        details.append({
-            "Question": number,
-            "Student Answer": student,
-            "Suggested Marks": round(score, 2),
-            "Maximum Marks": marks,
-            "Teacher Review": review
-        })
-
-    return round(total, 2), maximum, details
+    return json.loads(response.text)
 
 
 # SIDEBAR
@@ -123,40 +58,49 @@ page = st.sidebar.radio(
     [
         "Dashboard",
         "Create Exam",
-        "Answer Key",
-        "Upload Papers",
+        "Upload Question Paper",
+        "Review Answer Key",
+        "Upload Student Papers",
         "Results",
         "Class Analysis"
     ]
 )
 
 st.title("AI Student Grading System")
-st.caption("Automated Answer Sheet Evaluation")
+st.caption("Gemini-powered answer sheet evaluation")
 
 
 # DASHBOARD
 if page == "Dashboard":
 
-    total = sum(q["marks"] for q in st.session_state.questions)
+    total_marks = sum(
+        float(q["marks"])
+        for q in st.session_state.questions
+    )
 
     a, b, c = st.columns(3)
 
     a.metric("Questions", len(st.session_state.questions))
     b.metric("Students Evaluated", len(st.session_state.results))
-    c.metric("Maximum Marks", total)
+    c.metric("Maximum Marks", total_marks)
 
     st.subheader(st.session_state.exam)
 
     st.write(
-        "Create examinations, upload answer sheets, "
-        "evaluate marks and analyse class performance."
+        "Upload a question paper, generate an AI answer key, "
+        "evaluate student papers and analyse class performance."
     )
+
+    if st.session_state.approved:
+        st.success("Answer key approved and ready for evaluation.")
+    else:
+        st.info("Upload a question paper to begin.")
 
 
 # CREATE EXAM
 elif page == "Create Exam":
 
-    st.subheader("Create Examination")
+    st.subheader("Examination Details")
 
     name = st.text_input(
         "Examination Name",
@@ -168,137 +112,258 @@ elif page == "Create Exam":
         st.success("Examination saved!")
 
 
-# ANSWER KEY
-elif page == "Answer Key":
+# UPLOAD QUESTION PAPER
+elif page == "Upload Question Paper":
 
-    st.subheader("Create Answer Key")
+    st.subheader("Upload Question Paper")
 
-    with st.form("question_form"):
+    paper = st.file_uploader(
+        "Choose question paper",
+        type=["pdf", "png", "jpg", "jpeg"]
+    )
 
-        number = st.number_input(
-            "Question Number", min_value=1, step=1
-        )
+    if paper:
 
-        question = st.text_input("Question")
+        st.write("Uploaded:", paper.name)
 
-        qtype = st.selectbox(
-            "Question Type",
-            ["Objective", "Descriptive"]
-        )
+        if st.button("Generate AI Answer Key"):
 
-        answer = st.text_area("Correct Answer")
+            prompt = """
+            Read this examination question paper carefully.
 
-        marks = st.number_input(
-            "Marks", min_value=0.5, value=1.0
-        )
+            Extract every question, including subquestions.
+            Identify the marks for each question.
+            If marks are not visible, estimate them and clearly
+            mention that they are estimated.
 
-        submit = st.form_submit_button("Add Question")
+            Generate a suggested correct answer and marking points
+            for each question.
 
-    if submit:
+            Return JSON with this structure:
+            {
+              "questions": [
+                {
+                  "question_number": "1",
+                  "question": "Question text",
+                  "marks": 2,
+                  "suggested_answer": "Answer",
+                  "marking_points": "Important points"
+                }
+              ]
+            }
 
-        if not answer.strip():
-            st.error("Enter the correct answer.")
+            Do not invent unreadable questions.
+            Mark unclear information as UNCLEAR.
+            """
 
-        elif any(
-            q["number"] == int(number)
-            for q in st.session_state.questions
-        ):
-            st.error("Question number already exists.")
+            try:
+                with st.spinner("Gemini is reading the question paper..."):
 
-        else:
-            st.session_state.questions.append({
-                "number": int(number),
-                "question": question,
-                "type": qtype,
-                "answer": answer,
-                "marks": float(marks)
-            })
+                    data = ask_gemini(prompt, paper)
 
-            st.success("Question added!")
+                    questions = data.get("questions", [])
 
-    if st.session_state.questions:
+                    if not questions:
+                        st.error("No questions were extracted.")
+                    else:
+                        st.session_state.questions = questions
+                        st.session_state.approved = False
+                        st.session_state.results = []
 
-        st.write("Saved Answer Key")
+                        st.success(
+                            f"Extracted {len(questions)} questions!"
+                        )
 
-        st.dataframe(
-            pd.DataFrame(st.session_state.questions),
-            use_container_width=True
-        )
+                        st.info(
+                            "Open Review Answer Key to check the answers."
+                        )
 
-        if st.button("Clear Answer Key"):
-            st.session_state.questions = []
-            st.rerun()
+            except Exception as e:
+                st.error(f"Gemini error: {e}")
 
 
-# UPLOAD PAPERS
-elif page == "Upload Papers":
+# REVIEW ANSWER KEY
+elif page == "Review Answer Key":
 
-    st.subheader("Upload Student Answer Sheets")
+    st.subheader("AI Generated Answer Key")
 
     if not st.session_state.questions:
 
-        st.warning("Create an answer key first.")
+        st.warning("Upload a question paper first.")
+
+    else:
+
+        df = pd.DataFrame(st.session_state.questions)
+
+        edited = st.data_editor(
+            df,
+            use_container_width=True,
+            num_rows="dynamic"
+        )
+
+        if st.button("Approve Answer Key"):
+
+            try:
+                records = edited.to_dict(orient="records")
+
+                for q in records:
+                    q["marks"] = float(q["marks"])
+
+                    if q["marks"] <= 0:
+                        raise ValueError("Marks must be greater than zero.")
+
+                    if not str(q["suggested_answer"]).strip():
+                        raise ValueError(
+                            f"Question {q['question_number']} has no answer."
+                        )
+
+                st.session_state.questions = records
+                st.session_state.approved = True
+
+                st.success("Answer key approved!")
+
+            except Exception as e:
+                st.error(str(e))
+
+
+# UPLOAD STUDENT PAPERS
+elif page == "Upload Student Papers":
+
+    st.subheader("Evaluate Student Answer Sheets")
+
+    if not st.session_state.approved:
+
+        st.warning("Approve the answer key before uploading student papers.")
 
     else:
 
         files = st.file_uploader(
-            "Upload answer sheet images",
-            type=["jpg", "jpeg", "png"],
+            "Upload student papers",
+            type=["pdf", "png", "jpg", "jpeg"],
             accept_multiple_files=True
         )
 
         for file in files or []:
 
-            st.write("File:", file.name)
+            with st.expander(file.name):
 
-            name = st.text_input(
-                "Student Name",
-                file.name.rsplit(".", 1)[0],
-                key="name_" + file.name
-            )
-
-            try:
-                extracted = read_image(file)
-
-                text = st.text_area(
-                    "Extracted Answers — correct OCR mistakes here",
-                    extracted,
-                    height=180,
-                    key="text_" + file.name
+                student = st.text_input(
+                    "Student name",
+                    file.name.rsplit(".", 1)[0],
+                    key="student_" + file.name
                 )
 
                 if st.button(
-                    "Evaluate " + file.name,
-                    key="button_" + file.name
+                    "Evaluate Paper",
+                    key="evaluate_" + file.name
                 ):
 
-                    answers = extract_answers(text)
+                    prompt = f"""
+                    Evaluate this student's answer sheet.
 
-                    if not answers:
-                        st.error(
-                            "No numbered answers found. "
-                            "Use labels like 1. Answer, 2. Answer."
-                        )
+                    APPROVED ANSWER KEY:
+                    {json.dumps(st.session_state.questions)}
 
-                    else:
-                        marks, maximum, details = evaluate(answers)
+                    Instructions:
+                    - Read the student's answers carefully.
+                    - Match each answer to the correct question.
+                    - Award marks only up to the maximum marks.
+                    - Accept valid alternative wording.
+                    - Do not assume missing answers are correct.
+                    - Flag unclear handwriting or uncertain answers.
+                    - Descriptive marking is an AI suggestion and
+                      must be reviewed by the teacher.
 
-                        st.session_state.results.append({
-                            "Student": name,
-                            "Marks": marks,
-                            "Maximum Marks": maximum,
-                            "Percentage": round(
-                                marks / maximum * 100, 2
-                            ) if maximum else 0,
-                            "Details": details
-                        })
+                    Return JSON:
+                    {{
+                      "answers": [
+                        {{
+                          "question_number": "1",
+                          "student_answer": "Extracted answer",
+                          "marks_awarded": 2,
+                          "feedback": "Reason for marks",
+                          "review_required": true
+                        }}
+                      ]
+                    }}
+                    """
 
-                        st.success(
-                            f"Evaluation complete: {marks}/{maximum}"
-                        )
+                    try:
+                        with st.spinner("Gemini is evaluating the paper..."):
 
-            except Exception as e:
-                st.error("OCR error: " + str(e))
+                            data = ask_gemini(prompt, file)
+
+                            answer_rows = data.get("answers", [])
+
+                            maximum = sum(
+                                float(q["marks"])
+                                for q in st.session_state.questions
+                            )
+
+                            question_marks = {
+                                str(q["question_number"]): float(q["marks"])
+                                for q in st.session_state.questions
+                            }
+
+                            cleaned = []
+                            total = 0
+
+                            for answer in answer_rows:
+
+                                number = str(answer["question_number"])
+
+                                if number not in question_marks:
+                                    continue
+
+                                awarded = max(
+                                    0,
+                                    min(
+                                        float(answer["marks_awarded"]),
+                                        question_marks[number]
+                                    )
+                                )
+
+                                total += awarded
+
+                                cleaned.append({
+                                    "Question": number,
+                                    "Student Answer": answer.get(
+                                        "student_answer", ""
+                                    ),
+                                    "Marks": awarded,
+                                    "Maximum Marks": question_marks[number],
+                                    "Feedback": answer.get("feedback", ""),
+                                    "Teacher Review": answer.get(
+                                        "review_required", True
+                                    )
+                                })
+
+                            st.session_state.results.append({
+                                "Student": student,
+                                "Marks": round(total, 2),
+                                "Maximum Marks": maximum,
+                                "Percentage": round(
+                                    total / maximum * 100, 2
+                                ) if maximum else 0,
+                                "Details": cleaned
+                            })
+
+                            st.success(
+                                f"Suggested score: {total}/{maximum}"
+                            )
+
+                            st.dataframe(
+                                pd.DataFrame(cleaned),
+                                use_container_width=True
+                            )
+
+                            st.warning(
+                                "Review the extracted answers and marks "
+                                "before finalising the result."
+                            )
+
+                    except Exception as e:
+                        st.error(f"Evaluation error: {e}")
 
 
 # RESULTS
@@ -312,12 +377,12 @@ elif page == "Results":
 
     else:
 
-        data = [
-            {k: v for k, v in result.items() if k != "Details"}
-            for result in st.session_state.results
+        summary = [
+            {k: v for k, v in r.items() if k != "Details"}
+            for r in st.session_state.results
         ]
 
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(summary)
 
         st.dataframe(df, use_container_width=True)
 
@@ -330,52 +395,37 @@ elif page == "Results":
                     use_container_width=True
                 )
 
-                if any(
-                    d["Teacher Review"] == "Yes"
-                    for d in result["Details"]
-                ):
-                    st.warning(
-                        "Descriptive marks are suggestions only. "
-                        "Teacher review is required."
-                    )
-
         st.download_button(
             "Download Results CSV",
             df.to_csv(index=False).encode("utf-8"),
-            "student_results.csv",
+            "class_results.csv",
             "text/csv"
         )
-
-        if st.button("Clear Results"):
-            st.session_state.results = []
-            st.rerun()
 
 
 # CLASS ANALYSIS
 elif page == "Class Analysis":
 
-    st.subheader("Class Performance Analysis")
+    st.subheader("Class Performance")
 
     if not st.session_state.results:
 
-        st.info("Evaluate students to view class analysis.")
+        st.info("Evaluate students to see class performance.")
 
     else:
 
         df = pd.DataFrame([
-            {k: v for k, v in result.items() if k != "Details"}
-            for result in st.session_state.results
+            {k: v for k, v in r.items() if k != "Details"}
+            for r in st.session_state.results
         ])
 
         a, b, c = st.columns(3)
 
         a.metric("Students", len(df))
-
         b.metric(
             "Class Average",
             f"{df['Percentage'].mean():.1f}%"
         )
-
         c.metric(
             "Highest Score",
             f"{df['Percentage'].max():.1f}%"
@@ -387,6 +437,4 @@ elif page == "Class Analysis":
 
 
 st.sidebar.divider()
-st.sidebar.caption(
-    "AI Grading System | Teacher-reviewed prototype"
-)
+st.sidebar.caption("AI Grading System | Teacher-reviewed prototype")
