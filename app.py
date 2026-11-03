@@ -24,13 +24,27 @@ for key, value in {
         st.session_state[key] = value
 
 
-# GEMINI CONNECTION
-def get_client():
-    return genai.Client(
-        api_key=st.secrets["GEMINI_API_KEY"]
-    )
+def ask_gemini(prompt, uploaded_file):
+    client = get_client()
 
+    try:
+        part = types.Part.from_bytes(
+            data=uploaded_file.getvalue(),
+            mime_type=uploaded_file.type
+        )
 
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=[prompt, part],
+            config={
+                "response_mime_type": "application/json"
+            }
+        )
+
+        return json.loads(response.text)
+
+    finally:
+        client.close()
 def ask_gemini(prompt, uploaded_file):
     mime = uploaded_file.type
 
