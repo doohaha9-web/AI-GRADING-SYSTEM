@@ -1,386 +1,257 @@
 
 import streamlit as st
 import pandas as pd
+import pytesseract
 import re
+import io
 
+from PIL import Image, ImageOps, ImageEnhance
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+st.set_page_config(page_title="AI Grading System", page_icon="📝", layout="wide")
 
-# =====================================
-# PAGE CONFIGURATION
-# =====================================
+st.title("AI Student Grading System")
+st.caption("Automated answer sheet evaluation")
 
-st.set_page_config(
-    page_title="AI Answer Grading System",
-    page_icon="🎓",
-    layout="wide"
-)
-
-st.title("🎓 AI Based Automatic Answer Grading System")
-
-st.write(
-    "An intelligent examination system that checks "
-    "student answers and automatically awards marks."
-)
-
-st.divider()
-
-
-# =====================================
-# SESSION STATE
-# =====================================
-
+if "key" not in st.session_state:
+    st.session_state.key = None
 if "results" not in st.session_state:
     st.session_state.results = []
+if "details" not in st.session_state:
+    st.session_state.details = []
 
 
-# =====================================
-# TEXT PREPROCESSING
-# =====================================
-
-def preprocess(text):
-
-    text = text.lower()
-
-    text = re.sub(r'[^a-z0-9\s]', '', text)
-
-    return text
+# TEXT PROCESSING
+def clean(text):
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", str(text).lower())).strip()
 
 
-# =====================================
-# AI ANSWER EVALUATION
-# =====================================
-
-def evaluate_answer(
-    correct_answer,
-    student_answer,
-    maximum_marks
-):
-
-    correct_answer = preprocess(correct_answer)
-    student_answer = preprocess(student_answer)
-
-    if not student_answer.strip():
-        return 0, 0, "Incorrect"
-
-    if not correct_answer.strip():
-        return 0, 0, "Incorrect"
-
-    vectorizer = TfidfVectorizer(
-        stop_words="english",
-        ngram_range=(1, 2)
-    )
-
-    try:
-
-        vectors = vectorizer.fit_transform([
-            correct_answer,
-            student_answer
-        ])
-
-        similarity = cosine_similarity(
-            vectors[0:1],
-            vectors[1:2]
-        )[0][0]
-
-    except ValueError:
-
-        similarity = 0
-
-    percentage = similarity * 100
-
-    marks = round(
-        similarity * maximum_marks,
-        2
-    )
-
-    # Grading system
-
-    if percentage >= 65:
-
-        status = "Correct"
-
-    elif percentage >= 25:
-
-        status = "Partially Correct"
-
-    else:
-
-        status = "Incorrect"
-
-    return marks, percentage, status
+# IMAGE OCR
+def read_image(file):
+    img = Image.open(io.BytesIO(file.getvalue()))
+    img = ImageOps.exif_transpose(img).convert("L")
+    img = ImageEnhance.Contrast(img).enhance(2)
+    return pytesseract.image_to_string(img, config="--psm 6")
 
 
-# =====================================
-# GRADE CALCULATION
-# =====================================
+# EXTRACT QUESTION ANSWERS
+def extract_answers(text):
+    pattern = r"(?im)^\s*(?:question\s*|q\s*)?(\d+)\s*[\).:\-]\s*"
+    matches = list(re.finditer(pattern, text))
+    answers = {}
 
-def calculate_grade(percentage):
+    for i, match in enumerate(matches):
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        answers[int(match.group(1))] = text[start:end].strip()
 
-    if percentage >= 90:
-        return "A+"
-
-    elif percentage >= 80:
-        return "A"
-
-    elif percentage >= 70:
-        return "B"
-
-    elif percentage >= 60:
-        return "C"
-
-    elif percentage >= 40:
-        return "D"
-
-    else:
-        return "F"
+    return answers
 
 
-# =====================================
-# STUDENT INFORMATION
-# =====================================
-
-st.header("👨‍🎓 Student Information")
-
-col1, col2 = st.columns(2)
-
-with col1:
-
-    student_name = st.text_input(
-        "Student Name"
-    )
-
-with col2:
-
-    roll_number = st.text_input(
-        "Roll Number"
-    )
+# OBJECTIVE EVALUATION
+def objective(student, expected):
+    accepted = [clean(x) for x in str(expected).split("|")]
+    return 1.0 if clean(student) in accepted and clean(student) else 0.0
 
 
-st.divider()
+# DESCRIPTIVE EVALUATION
+def descriptive(student, expected):
+    student = clean(student)
+    answers = [clean(x) for x in str(expected).split("|") if clean(x)]
+
+    if not student or not answers:
+        return 0.0
+
+    scores = []
+
+    for answer in answers:
+        try:
+            vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 5))
+            vectors = vectorizer.fit_transform([student, answer])
+            scores.append(cosine_similarity(vectors[0:1], vectors[1:2])[0][0])
+        except ValueError:
+            scores.append(0.0)
+
+    return max(scores, default=0.0)
 
 
-# =====================================
-# QUESTION SECTION
-# =====================================
-
-st.header("📝 Examination Question")
-
-subject = st.selectbox(
-    "Select Subject",
-    [
-        "Computer Science",
-        "Physics",
-        "Chemistry",
-        "Mathematics",
-        "Biology",
-        "English"
-    ]
-)
-
-question = st.text_area(
-    "Enter Question",
-    placeholder="Enter the examination question here..."
-)
-
-correct_answer = st.text_area(
-    "Enter the Correct Answer",
-    placeholder="Enter the teacher's model answer..."
-)
-
-student_answer = st.text_area(
-    "Enter Student Answer",
-    placeholder="Enter the student's answer here..."
-)
-
-maximum_marks = st.number_input(
-    "Maximum Marks",
-    min_value=1,
-    max_value=100,
-    value=5
+# NAVIGATION
+page = st.sidebar.radio(
+    "Teacher Dashboard",
+    ["Dashboard", "Answer Key", "Upload Papers", "Results", "Analysis"]
 )
 
 
-# =====================================
-# EVALUATION
-# =====================================
+# DASHBOARD
+if page == "Dashboard":
+    st.header("Examination Dashboard")
+    c1, c2 = st.columns(2)
+    c1.metric("Questions", len(st.session_state.key) if st.session_state.key is not None else 0)
+    c2.metric("Students Evaluated", len(st.session_state.results))
+    st.write("Create exams, upload answer sheets, evaluate marks and analyse class performance.")
 
-if st.button(
-    "🚀 Evaluate Answer",
-    use_container_width=True
-):
 
-    if not student_name.strip():
+# ANSWER KEY
+elif page == "Answer Key":
+    st.header("Create Answer Key")
+    st.text_input("Examination Name", key="exam")
 
-        st.error("Please enter student name.")
-
-    elif not roll_number.strip():
-
-        st.error("Please enter roll number.")
-
-    elif not question.strip():
-
-        st.error("Please enter a question.")
-
-    elif not correct_answer.strip():
-
-        st.error("Please enter correct answer.")
-
-    elif not student_answer.strip():
-
-        st.error("Please enter student answer.")
-
-    else:
-
-        marks, similarity, status = evaluate_answer(
-            correct_answer,
-            student_answer,
-            maximum_marks
-        )
-
-        grade = calculate_grade(similarity)
-
-        st.session_state.results.append({
-
-            "Name": student_name,
-            "Roll Number": roll_number,
-            "Subject": subject,
-            "Question": question,
-            "Marks": marks,
-            "Maximum Marks": maximum_marks,
-            "Similarity": round(similarity, 2),
-            "Status": status,
-            "Grade": grade
-
+    if st.session_state.key is None:
+        initial = pd.DataFrame({
+            "Question No": [1, 2, 3],
+            "Question": ["Question 1", "Question 2", "Question 3"],
+            "Type": ["Objective", "Descriptive", "Objective"],
+            "Correct Answer": ["25", "Plants make food through photosynthesis", "100"],
+            "Marks": [2, 5, 3]
         })
+    else:
+        initial = st.session_state.key
 
-        st.divider()
+    data = st.data_editor(
+        initial, num_rows="dynamic", use_container_width=True,
+        column_config={
+            "Type": st.column_config.SelectboxColumn(options=["Objective", "Descriptive"]),
+            "Marks": st.column_config.NumberColumn(min_value=0)
+        },
+        key="editor"
+    )
 
-        st.header("📊 Evaluation Result")
+    if st.button("Save Answer Key"):
+        valid = data.dropna().copy()
+        valid["Question No"] = pd.to_numeric(valid["Question No"], errors="coerce")
+        valid["Marks"] = pd.to_numeric(valid["Marks"], errors="coerce")
 
-        c1, c2, c3 = st.columns(3)
-
-        c1.metric(
-            "Marks Awarded",
-            str(marks) + " / " + str(maximum_marks)
-        )
-
-        c2.metric(
-            "Similarity Score",
-            str(round(similarity, 2)) + "%"
-        )
-
-        c3.metric(
-            "Grade",
-            grade
-        )
-
-        st.progress(
-            min(1.0, max(0.0, similarity / 100))
-        )
-
-        if status == "Correct":
-
-            st.success("✅ Answer is Correct")
-
-        elif status == "Partially Correct":
-
-            st.warning("⚠️ Answer is Partially Correct")
-
+        if valid.empty or valid[["Question No", "Question", "Type", "Correct Answer", "Marks"]].isna().any().any():
+            st.error("Complete all question fields.")
+        elif valid["Question No"].duplicated().any() or (valid["Marks"] < 0).any():
+            st.error("Question numbers must be unique and marks non-negative.")
         else:
+            st.session_state.key = valid
+            st.session_state.results = []
+            st.session_state.details = []
+            st.success("Answer key saved!")
 
-            st.error("❌ Answer is Incorrect")
 
-        st.info(
-            "The similarity score measures text similarity. "
-            "It does not guarantee factual correctness."
+# UPLOAD AND EVALUATE
+elif page == "Upload Papers":
+    st.header("Upload Student Answer Sheets")
+
+    if st.session_state.key is None:
+        st.warning("Create an answer key first.")
+    else:
+        files = st.file_uploader("Upload answer sheet images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+
+        if files and st.button("Start Evaluation", type="primary"):
+            progress = st.progress(0)
+
+            for i, file in enumerate(files):
+                name = file.name.rsplit(".", 1)[0]
+
+                try:
+                    text = read_image(file)
+                    answers = extract_answers(text)
+                    total = 0
+                    maximum = 0
+                    review = 0
+                    detail = []
+                    result = {"Student": name}
+
+                    for _, q in st.session_state.key.iterrows():
+                        number = int(q["Question No"])
+                        student = answers.get(number, "")
+                        expected = str(q["Correct Answer"])
+                        marks = float(q["Marks"])
+                        maximum += marks
+
+                        score = objective(student, expected) if q["Type"] == "Objective" else descriptive(student, expected)
+                        awarded = round(marks * score, 2)
+                        status = "Correct" if score == 1 else "Incorrect"
+
+                        if not student:
+                            awarded, status = 0, "Answer Not Detected"
+                            review += 1
+                        elif q["Type"] == "Descriptive":
+                            status = "Teacher Review Required"
+                            review += 1
+
+                        total += awarded
+                        result[f"Q{number}"] = awarded
+
+                        detail.append({
+                            "Student": name,
+                            "Question": number,
+                            "Student Answer": student,
+                            "Correct Answer": expected,
+                            "Similarity (%)": round(score * 100, 2),
+                            "Marks": awarded,
+                            "Status": status
+                        })
+
+                    result.update({
+                        "Total": round(total, 2),
+                        "Maximum": maximum,
+                        "Percentage": round(total / maximum * 100, 2) if maximum else 0,
+                        "Review Required": review
+                    })
+
+                    st.session_state.results.append(result)
+                    st.session_state.details.extend(detail)
+
+                    with st.expander(f"OCR: {name}"):
+                        st.text(text)
+
+                except Exception as e:
+                    st.error(f"{name}: {e}")
+
+                progress.progress((i + 1) / len(files))
+
+            st.success("Evaluation completed!")
+
+
+# RESULTS
+elif page == "Results":
+    st.header("Student Results")
+
+    if st.session_state.results:
+        df = pd.DataFrame(st.session_state.results)
+        st.dataframe(df, use_container_width=True)
+
+        a, b, c = st.columns(3)
+        a.metric("Students", len(df))
+        b.metric("Class Average", f"{df['Percentage'].mean():.2f}%")
+        c.metric("Highest Marks", df["Total"].max())
+
+        st.download_button(
+            "Download CSV",
+            df.to_csv(index=False).encode("utf-8"),
+            "class_results.csv",
+            "text/csv"
         )
 
-
-# =====================================
-# STUDENT PERFORMANCE TABLE
-# =====================================
-
-st.divider()
-
-st.header("📚 Student Performance Dashboard")
-
-if st.session_state.results:
-
-    df = pd.DataFrame(
-        st.session_state.results
-    )
-
-    st.dataframe(
-        df,
-        use_container_width=True
-    )
-
-    total_marks = df["Marks"].sum()
-
-    maximum_total = df["Maximum Marks"].sum()
-
-    st.metric(
-        "Total Marks",
-        str(round(total_marks, 2))
-        + " / "
-        + str(maximum_total)
-    )
-
-    if maximum_total > 0:
-
-        overall_percentage = (
-            total_marks / maximum_total
-        ) * 100
-
-        st.metric(
-            "Overall Percentage",
-            str(round(overall_percentage, 2)) + "%"
-        )
-
-    # DOWNLOAD REPORT
-
-    csv = df.to_csv(
-        index=False
-    ).encode("utf-8")
-
-    st.download_button(
-        label="📥 Download Student Report",
-        data=csv,
-        file_name="student_results.csv",
-        mime="text/csv"
-    )
-
-else:
-
-    st.info(
-        "Student results will appear here after evaluation."
-    )
+        st.subheader("Detailed Evaluation")
+        st.dataframe(pd.DataFrame(st.session_state.details), use_container_width=True)
+    else:
+        st.info("No results available yet.")
 
 
-# =====================================
-# PROJECT INFORMATION
-# =====================================
+# PERFORMANCE ANALYSIS
+elif page == "Analysis":
+    st.header("Class Performance Analysis")
 
-st.divider()
+    if st.session_state.results:
+        df = pd.DataFrame(st.session_state.results)
+        st.bar_chart(df.set_index("Student")["Percentage"])
 
-st.subheader("About This Project")
+        if st.session_state.details:
+            details = pd.DataFrame(st.session_state.details)
+            analysis = details.groupby("Question").agg(
+                Average_Marks=("Marks", "mean"),
+                Students=("Student", "count")
+            ).reset_index()
 
-st.write("""
-This AI-based automatic answer grading system
-uses Natural Language Processing techniques.
-
-Scikit-learn is used for TF-IDF vectorization
-and cosine similarity to compare answers.
-
-Pandas is used to organize student examination
-results and generate performance reports.
-
-Streamlit provides the interactive web interface.
-""")
-
-st.caption(
-    "Class 12 Artificial Intelligence Project"
-)
-
+            st.subheader("Question-wise Performance")
+            st.dataframe(analysis, use_container_width=True)
+            st.bar_chart(analysis.set_index("Question")["Average_Marks"])
+    else:
+        st.info("Evaluate students to view analysis.")
